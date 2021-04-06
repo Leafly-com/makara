@@ -3,14 +3,14 @@ require 'makara/sidekiq/middleware'
 
 describe Makara::Sidekiq::Middleware do
   let(:worker)  { class_double('Worker') }
-  let(:job)     { Hash.new }
+  let(:job)     { {} }
   let(:queue)   { 'default' }
 
   shared_examples 'a cleared context' do
     it 'clears the context' do
       expect(::Makara::Context).to receive(:set_current).with({})
 
-      subject.call(worker, job, queue) {}
+      subject.call(worker, job, queue)
     end
   end
 

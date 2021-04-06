@@ -39,7 +39,6 @@ module Makara
   module Sidekiq
     autoload :Middleware, 'makara/sidekiq/middleware'
   end
-
 end
 
 ActiveSupport.on_load(:active_record) do
