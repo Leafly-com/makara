@@ -1,3 +1,4 @@
+require 'uri'
 require 'active_record'
 require 'makara'
 require 'timecop'
@@ -5,13 +6,17 @@ require 'yaml'
 require 'rack'
 
 begin
-  require 'byebug'
+  require 'pry'
 rescue LoadError
 end
 
 begin
   require 'ruby-debug'
 rescue LoadError
+end
+
+if RUBY_VERSION >= "2.7.0"
+  Warning[:deprecated] = true
 end
 
 RSpec.configure do |config|

@@ -1,10 +1,10 @@
 require 'spec_helper'
 
 describe Makara::Pool do
-
-  let(:proxy){ FakeProxy.new({:makara => pool_config.merge(:connections => [])}) }
+  let(:proxy){ FakeProxy.new({makara: pool_config.merge(connections: [])}) }
   let(:pool){ Makara::Pool.new('test', proxy) }
-  let(:pool_config){ {:blacklist_duration => 5} }
+  let(:pool_config){ {blacklist_duration: 5} }
+  let(:primary_pool){ Makara::Pool.new('primary', proxy) }
 
   it 'should wrap connections with a ConnectionWrapper as theyre added to the pool' do
     expect(pool.connections).to be_empty
@@ -12,7 +12,7 @@ describe Makara::Pool do
     connection_a = FakeConnection.new(something: 'a')
 
     wrapper_a = pool.add(pool_config){ connection_a }
-    wrapper_b = pool.add(pool_config.merge(:weight => 2)){ FakeConnection.new }
+    wrapper_b = pool.add(pool_config.merge(weight: 2)){ FakeConnection.new }
 
     connections = pool.connections
     weighted_connections = pool.strategy.instance_variable_get("@weighted_connections")
@@ -28,7 +28,6 @@ describe Makara::Pool do
   end
 
   it 'should determine if its completely blacklisted' do
-
     pool.add(pool_config){ FakeConnection.new }
     pool.add(pool_config){ FakeConnection.new }
 
@@ -40,7 +39,6 @@ describe Makara::Pool do
   end
 
   it 'sends methods to all underlying objects if asked to' do
-
     a = FakeConnection.new
     b = FakeConnection.new
 
@@ -51,11 +49,9 @@ describe Makara::Pool do
     expect(b).to receive(:query).with('test').once
 
     pool.send_to_all :query, 'test'
-
   end
 
   it 'only sends methods to underlying objects which are not blacklisted' do
-
     a = FakeConnection.new
     b = FakeConnection.new
     c = FakeConnection.new
@@ -71,11 +67,9 @@ describe Makara::Pool do
     wrapper_c._makara_blacklist!
 
     pool.send_to_all :query, 'test'
-
   end
 
   it 'provides the next connection and blacklists' do
-
     connection_a = FakeConnection.new(something: 'a')
     connection_b = FakeConnection.new(something: 'b')
 
@@ -95,7 +89,6 @@ describe Makara::Pool do
       expect(wrapper_a._makara_blacklisted?).to eq(false)
       expect(wrapper_b._makara_blacklisted?).to eq(false)
     end
-
   end
 
   it 'provides the same connection if the context has not changed and the proxy is sticky' do
@@ -125,7 +118,6 @@ describe Makara::Pool do
   end
 
   it 'raises an error when all connections are blacklisted' do
-
     wrapper_a = pool.add(pool_config.dup){ FakeConnection.new }
     wrapper_b = pool.add(pool_config.dup){ FakeConnection.new }
 
@@ -133,7 +125,6 @@ describe Makara::Pool do
     pool.send_to_all :to_s
 
     allow(pool).to receive(:next).and_return(wrapper_a, wrapper_b, nil)
-
 
     begin
       pool.provide do |connection|
@@ -146,7 +137,6 @@ describe Makara::Pool do
   end
 
   it 'skips blacklisted connections when choosing the next one' do
-
     pool.add(pool_config){ FakeConnection.new }
     pool.add(pool_config){ FakeConnection.new }
 
@@ -154,7 +144,28 @@ describe Makara::Pool do
     wrapper_b._makara_blacklist!
 
     10.times{ pool.provide{|connection| expect(connection).not_to eq(wrapper_b) } }
-
   end
 
+  it 'should error out while blacklisted in transaction' do
+    wrapper_a = primary_pool.add(pool_config){ FakeConnection.new(open_transactions: 1) }
+    primary_pool.add(pool_config){ FakeConnection.new }
+    expect {
+      primary_pool.provide do |connection|
+        if connection == wrapper_a
+          raise Makara::Errors::BlacklistConnection.new(wrapper_a, StandardError.new('failure'))
+        end
+      end
+    }.to raise_error(Makara::Errors::BlacklistedWhileInTransaction)
+  end
+
+  it 'skips blacklisted connections in primary pool when not in transaction' do
+    wrapper_a = primary_pool.add(pool_config){ FakeConnection.new(open_transactions: 0) }
+    primary_pool.add(pool_config){ FakeConnection.new }
+    primary_pool.provide do |connection|
+      if connection == wrapper_a
+        raise Makara::Errors::BlacklistConnection.new(wrapper_a, StandardError.new('failure'))
+      end
+    end
+    10.times{ primary_pool.provide{|connection| expect(connection).not_to eq(wrapper_a) } }
+  end
 end

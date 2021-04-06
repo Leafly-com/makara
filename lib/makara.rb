@@ -5,7 +5,6 @@ if defined?(Rails)
   require 'makara/sidekiq/railtie' if defined?(Sidekiq)
 end
 module Makara
-
   autoload :Cache,              'makara/cache'
   autoload :ConfigParser,       'makara/config_parser'
   autoload :ConnectionWrapper,  'makara/connection_wrapper'
@@ -17,10 +16,12 @@ module Makara
   autoload :Proxy,              'makara/proxy'
 
   module Errors
-    autoload :MakaraError,                'makara/errors/makara_error'
-    autoload :AllConnectionsBlacklisted,  'makara/errors/all_connections_blacklisted'
-    autoload :BlacklistConnection,        'makara/errors/blacklist_connection'
-    autoload :NoConnectionsAvailable,     'makara/errors/no_connections_available'
+    autoload :MakaraError,                   'makara/errors/makara_error'
+    autoload :AllConnectionsBlacklisted,     'makara/errors/all_connections_blacklisted'
+    autoload :BlacklistConnection,           'makara/errors/blacklist_connection'
+    autoload :NoConnectionsAvailable,        'makara/errors/no_connections_available'
+    autoload :BlacklistedWhileInTransaction, 'makara/errors/blacklisted_while_in_transaction'
+    autoload :InvalidShard,                  'makara/errors/invalid_shard'
   end
 
   module Logging
@@ -32,6 +33,7 @@ module Makara
     autoload :Abstract,         'makara/strategies/abstract'
     autoload :RoundRobin,       'makara/strategies/round_robin'
     autoload :PriorityFailover, 'makara/strategies/priority_failover'
+    autoload :ShardAware,       'makara/strategies/shard_aware'
   end
 
   module Sidekiq

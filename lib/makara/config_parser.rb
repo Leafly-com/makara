@@ -1,6 +1,7 @@
 require 'digest/md5'
 require 'active_support/core_ext/hash/keys'
 require 'active_support/core_ext/hash/except'
+require 'cgi'
 
 # Convenience methods to grab subconfigs out of the primary configuration.
 # Provides a way to generate a consistent ID based on a unique config.
@@ -9,115 +10,39 @@ require 'active_support/core_ext/hash/except'
 #   top_level: 'variable'
 #   another: 'top level variable'
 #   makara:
-#     master_ttl: 3
+#     primary_ttl: 3
 #     blacklist_duration: 20
 #     connections:
-#       - role: 'master'
-#       - role: 'slave'
-#       - role: 'slave'
-#         name: 'slave2'
+#       - role: 'master' # Deprecated in favor of 'primary'
+#       - role: 'primary'
+#       - role: 'slave' # Deprecated in favor of 'replica'
+#       - role: 'replica'
+#         name: 'replica2'
 
 module Makara
   class ConfigParser
-
     DEFAULTS = {
-      :master_ttl => 5,
-      :blacklist_duration => 30,
-      :sticky => true
+      primary_ttl: 5,
+      blacklist_duration: 30,
+      sticky: true
     }
 
-    # ConnectionUrlResolver is borrowed from Rails 4-2 since its location and implementation
-    # vary slightly among Rails versions, but the behavior is the same.  Thus, borrowing the
-    # class should be the most future-safe way to parse a database url.
-    #
-    # Expands a connection string into a hash.
-    class ConnectionUrlResolver # :nodoc:
+    DEPRECATED_KEYS = {
+      slave_strategy:       :replica_strategy,
+      slave_shard_aware:    :replica_shard_aware,
+      slave_default_shard:  :replica_default_shard,
+      master_strategy:      :primary_strategy,
+      master_shard_aware:   :primary_shard_aware,
+      master_default_shard: :primary_default_shard,
+      master_ttl:           :primary_ttl
+    }.freeze
 
-      # == Example
-      #
-      #   url = "postgresql://foo:bar@localhost:9000/foo_test?pool=5&timeout=3000"
-      #   ConnectionUrlResolver.new(url).to_hash
-      #   # => {
-      #     "adapter"  => "postgresql",
-      #     "host"     => "localhost",
-      #     "port"     => 9000,
-      #     "database" => "foo_test",
-      #     "username" => "foo",
-      #     "password" => "bar",
-      #     "pool"     => "5",
-      #     "timeout"  => "3000"
-      #   }
-      def initialize(url)
-        raise "Database URL cannot be empty" if url.blank?
-        @uri     = URI.parse(url)
-        @adapter = @uri.scheme.tr('-', '_')
-        @adapter = "postgresql" if @adapter == "postgres"
-
-        if @uri.opaque
-          @uri.opaque, @query = @uri.opaque.split('?', 2)
-        else
-          @query = @uri.query
-        end
+    ConnectionUrlResolver =
+      if ::ActiveRecord::VERSION::STRING >= "6.1.0"
+        ::ActiveRecord::DatabaseConfigurations::ConnectionUrlResolver
+      else
+        ::ActiveRecord::ConnectionAdapters::ConnectionSpecification::ConnectionUrlResolver
       end
-
-      # Converts the given URL to a full connection hash.
-      def to_hash
-        config = raw_config.reject { |_,value| value.blank? }
-        config.map { |key,value| config[key] = URI.unescape(value) if value.is_a? String }
-        config
-      end
-
-      private
-
-      def uri
-        @uri
-      end
-
-      # Converts the query parameters of the URI into a hash.
-      #
-      #   "localhost?pool=5&reaping_frequency=2"
-      #   # => { "pool" => "5", "reaping_frequency" => "2" }
-      #
-      # returns empty hash if no query present.
-      #
-      #   "localhost"
-      #   # => {}
-      def query_hash
-        Hash[(@query || '').split("&").map { |pair| pair.split("=") }]
-      end
-
-      def raw_config
-        if uri.opaque
-          query_hash.merge({
-            "adapter"  => @adapter,
-            "database" => uri.opaque })
-        else
-          query_hash.merge({
-            "adapter"  => @adapter,
-            "username" => uri.user,
-            "password" => uri.password,
-            "port"     => uri.port,
-            "database" => database_from_path,
-            "host"     => uri.host })
-        end
-      end
-
-      # Returns name of the database.
-      def database_from_path
-        if @adapter == 'sqlite3'
-          # 'sqlite3:/foo' is absolute, because that makes sense. The
-          # corresponding relative version, 'sqlite3:foo', is handled
-          # elsewhere, as an "opaque".
-
-          uri.path
-        else
-          # Only SQLite uses a filename as the "database" name; for
-          # anything else, a leading slash would be silly.
-
-          uri.path.sub(%r{^/}, "")
-        end
-      end
-    end
 
     # NOTE: url format must be, e.g.
     # url: mysql2://...
@@ -130,6 +55,7 @@ module Makara
         Makara::Logging::Logger.log "Please rename DATABASE_URL to use in the database.yml", :warn
       end
       return config unless config.key?(:url)
+
       url = config[:url]
       url_config = ConnectionUrlResolver.new(url).to_hash
       url_config = url_config.symbolize_keys
@@ -144,9 +70,11 @@ module Makara
       @config = config.symbolize_keys
       @makara_config = DEFAULTS.merge(@config[:makara] || {})
       @makara_config = @makara_config.symbolize_keys
+
+      replace_deprecated_keys!
+
       @id = sanitize_id(@makara_config[:id])
     end
-
 
     def id
       @id ||= begin
@@ -155,36 +83,51 @@ module Makara
       end
     end
 
+    def primary_configs
+      all_configs
+        .select { |config| config[:role] == 'primary' }
+        .map { |config| config.except(:role) }
+    end
 
     def master_configs
-      all_configs
-        .select { |config| config[:role] == 'master' }
-        .map { |config| config.except(:role) }
+      warn "#{self.class}#master_configs is deprecated. Switch to #primary_configs"
+      primary_configs
     end
 
+    def replica_configs
+      all_configs
+        .reject { |config| config[:role] == 'primary' }
+        .map { |config| config.except(:role) }
+    end
 
     def slave_configs
-      all_configs
-        .reject { |config| config[:role] == 'master' }
-        .map { |config| config.except(:role) }
+      warn "#{self.class}#slave_configs is deprecated. Switch to #replica_configs"
+      replica_configs
     end
-
 
     protected
 
-
     def all_configs
-      @makara_config[:connections].map do |connection|
-        base_config.merge(makara_config.except(:connections))
-                   .merge(connection.symbolize_keys)
+      @all_configs ||= @makara_config[:connections].map do |connection|
+        config = base_config.merge(makara_config.except(:connections)).merge(connection.symbolize_keys)
+
+        if config[:role] == "master"
+          warn "Makara role 'master' is deprecated. Use 'primary' instead"
+          config[:role] = "primary"
+        end
+
+        if config[:role] == "slave"
+          warn "Makara role 'slave' is deprecated. Use 'replica' instead"
+          config[:role] = "primary"
+        end
+
+        config
       end
     end
-
 
     def base_config
       @base_config ||= DEFAULTS.merge(@config).except(:makara)
     end
-
 
     def recursive_sort(thing)
       return thing.to_s unless thing.include?(Enumerable)
@@ -194,9 +137,7 @@ module Makara
       end
 
       thing.sort_by(&:to_s)
-
     end
-
 
     def sanitize_id(id)
       return if id.nil? || id.empty?
@@ -205,6 +146,16 @@ module Makara
         if sanitized_id.size != id.size
           Makara::Logging::Logger.log "Proxy id '#{id}' changed to '#{sanitized_id}'", :warn
         end
+      end
+    end
+
+    def replace_deprecated_keys!
+      DEPRECATED_KEYS.each do |key, replacement|
+        next unless @makara_config[key]
+
+        warn "Makara config key #{key.inspect} is deprecated, use #{replacement.inspect} instead"
+
+        @makara_config[replacement] = @makara_config.delete(key)
       end
     end
   end

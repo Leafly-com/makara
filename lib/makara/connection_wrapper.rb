@@ -7,7 +7,6 @@ require 'active_support/core_ext/hash/keys'
 
 module Makara
   class ConnectionWrapper
-
     attr_accessor :initial_error, :config
 
     # invalid queries caused by connections switching that needs to be replaced
@@ -16,7 +15,7 @@ module Makara
     def initialize(proxy, connection, config)
       @config = config.symbolize_keys
       @connection = connection
-      @proxy  = proxy
+      @proxy = proxy
 
       if connection.nil?
         _makara_blacklist!
@@ -35,9 +34,17 @@ module Makara
       @config[:name]
     end
 
+    def _makara_shard_id
+      @config[:shard_id]
+    end
+
     # has this node been blacklisted?
     def _makara_blacklisted?
       @blacklisted_until.present? && @blacklisted_until.to_i > Time.now.to_i
+    end
+
+    def _makara_in_transaction?
+      @connection && @connection.open_transactions > 0
     end
 
     # blacklist this node for @config[:blacklist_duration] seconds
@@ -95,28 +102,21 @@ module Makara
 
     # we want to forward all private methods, since we could have kicked out from a private scenario
     def method_missing(m, *args, &block)
-      if _makara_connection.respond_to?(m)
-        _makara_connection.public_send(m, *args, &block)
-      else # probably private method
-        _makara_connection.__send__(m, *args, &block)
-      end
+      _makara_connection.send(m, *args, &block)
     end
 
+    ruby2_keywords :method_missing if Module.private_method_defined?(:ruby2_keywords)
 
-    class_eval <<-RUBY_EVAL, __FILE__, __LINE__ + 1
-      def respond_to#{RUBY_VERSION.to_s =~ /^1.8/ ? nil : '_missing'}?(m, include_private = false)
-        _makara_connection.respond_to?(m, true)
-      end
-    RUBY_EVAL
-
+    def respond_to_missing?(m, include_private = false)
+      _makara_connection.respond_to?(m, true)
+    end
 
     protected
 
     # once the underlying connection is present we must evaluate extra functionality into it.
     # all extra functionality is in the format of _makara*
     def _makara_decorate_connection(con)
-
-      extension = %Q{
+      extension = <<~RUBY
         # the proxy object controlling this connection
         def _makara
           @_makara
@@ -140,31 +140,52 @@ module Makara
         def _makara_name
           #{@config[:name].inspect}
         end
-      }
+      RUBY
+
+      args = RUBY_VERSION >= "3.0.0" ? "..." : "*args, &block"
 
       # Each method the Makara::Proxy needs to hijack should be redefined in the underlying connection.
       # The new definition should allow for the proxy to intercept the invocation if required.
       @proxy.class.hijack_methods.each do |meth|
-        extension << %Q{
-          def #{meth}(*args, &block)
+        method_call = RUBY_VERSION >= "3.0.0" ? "public_send(#{meth.inspect}, ...)" : "#{meth}(*args, &block)"
+
+        extension << <<~RUBY
+          def #{meth}(#{args})
             _makara_hijack do |proxy|
               if proxy
-                proxy.#{meth}(*args, &block)
+                proxy.#{method_call}
               else
                 super
               end
             end
           end
-        }
+        RUBY
+      end
+
+      # Control methods must always be passed to the
+      # Makara::Proxy control object for handling (typically
+      # related to ActiveRecord connection pool management)
+      @proxy.class.control_methods.each do |meth|
+        method_call = RUBY_VERSION >= "3.0.0" ? "public_send(#{meth.inspect}, ...)" : "#{meth}(*args=args, block)"
+
+        extension << <<~RUBY
+          def #{meth}(#{args})
+            proxy = _makara
+            if proxy
+              proxy.control.#{method_call}
+            else
+              super # Only if we are not wrapped any longer
+            end
+          end
+        RUBY
       end
 
       # extend the instance
-      con.instance_eval(extension)
+      con.instance_eval(extension, __FILE__, __LINE__ + 1)
       # set the makara context
       con._makara = @proxy
 
       con._makara
     end
-
   end
 end
